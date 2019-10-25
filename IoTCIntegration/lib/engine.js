@@ -6,7 +6,8 @@
 const crypto = require('crypto');
 
 const Device = require('azure-iot-device');
-const DeviceTransport = require('azure-iot-device-mqtt');
+const MQTT = require('azure-iot-device-mqtt').Mqtt;
+const HTTP = require('azure-iot-device-http').Http;
 var ProvisioningTransport = require('azure-iot-provisioning-device-mqtt').Mqtt;
 var SymmetricKeySecurityClient = require('azure-iot-security-symmetric-key').SymmetricKeySecurityClient;
 var ProvisioningDeviceClient = require('azure-iot-provisioning-device').ProvisioningDeviceClient;
@@ -27,7 +28,7 @@ const deviceCache = {};
  */
 module.exports = async function (context, device, measurements, properties, timestamp) {
     if (device) {
-        if (!device.deviceId || !/^[a-z0-9\-]+$/.test(device.deviceId)) {
+        if (!device.deviceId || !/^[a-zA-Z0-9\-_]+$/.test(device.deviceId)) {
             throw new StatusError('Invalid format: deviceId must be alphanumeric, lowercase, and may contain hyphens.', 400);
         }
     } else {
@@ -45,8 +46,15 @@ module.exports = async function (context, device, measurements, properties, time
     }
 
     try {
-        const client = Device.Client.fromConnectionString(await getDeviceConnectionString(context, device), DeviceTransport.Mqtt);
-        context.log('DEVICE CACHE: ', deviceCache);
+        var TRANSPORT_TYPE = "";
+        var client;
+        if (properties) {
+            client = Device.Client.fromConnectionString(await getDeviceConnectionString(context, device), MQTT);
+            TRANSPORT_TYPE = "MQTT";
+        } else {
+            client = Device.Client.fromConnectionString(await getDeviceConnectionString(context, device), HTTP);
+            TRANSPORT_TYPE = "HTTP";
+        }
     
         const message = new Device.Message(JSON.stringify(measurements));
 
@@ -55,17 +63,25 @@ module.exports = async function (context, device, measurements, properties, time
         }
 
         await client.open();
-        context.log('[MQTT] Sending telemetry for device ', device.deviceId);
-        await client.sendEvent(message);
+
+        if(measurements) {
+            context.log('[%s] Sending telemetry for device ', TRANSPORT_TYPE, device.deviceId);
+            await client.sendEvent(message);
+            context.log('[%s] Telemetry sent for ', TRANSPORT_TYPE,device.deviceId);
+        }        
+        
         if (properties) {
-            context.log('[MQTT] Get twin', device.deviceId);
+            context.log('[%s] Get twin', TRANSPORT_TYPE,device.deviceId);
             var twin = await client.getTwin();
-            context.log('[MQTT] Obtained twin for device ', device.deviceId);
+            context.log('[%s] Obtained twin for device ', TRANSPORT_TYPE,device.deviceId);
             await twin.properties.reported.update(properties);
-            context.log('[MQTT] Updated twin for device ', device.deviceId);
+            context.log('[%s] Updated twin for device ', TRANSPORT_TYPE,device.deviceId);
         }
+
+        context.log('[%s] Closing client for ', TRANSPORT_TYPE,device.deviceId);
         await client.close();
-        context.log('[MQTT] Client closed for ', device.deviceId);
+        context.log('[%s] Client closed for ', TRANSPORT_TYPE,device.deviceId);
+   
     } catch (e) {
         // If the device was deleted, we remove its cached connection string
         if (e.name === 'DeviceNotFoundError' && deviceCache[device.deviceId]) {
@@ -85,9 +101,24 @@ function validateMeasurements(measurements) {
     }
 
     for (const field in measurements) {
-        if (typeof measurements[field] !== 'number' && typeof measurements[field] !== 'string') {
+        if (typeof measurements[field] !== 'number' && typeof measurements[field] !== 'string' && !isLocation(measurements[field])) {
             return false;
         }
+    }
+
+    return true;
+}
+
+/**
+ * @returns true if a measurement is a location.
+ */
+function isLocation(measurement) {
+    if (!measurement || typeof measurement !== 'object' || typeof measurement.lat !== 'number' || typeof measurement.lon !== 'number') {
+        return false;
+    }
+
+    if ('alt' in measurement && typeof measurement.alt !== 'number') {
+        return false;
     }
 
     return true;
